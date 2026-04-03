@@ -1,4 +1,4 @@
-package dev.ujhhgtg.nameof
+package dev.ujhhgtg.comptime
 
 class ClassName
 
@@ -9,16 +9,25 @@ val propertyName: String
 
 object ObjectName
 
-fun main() {
+fun testNameOf() {
     fun localFunctionName() {}
     val variableName = ""
 
-    println("class: ${nameof(ClassName::class)}")
-    println("function: ${nameof(::functionName)}")
-    println("local function: ${nameof(::localFunctionName)}")
-    println("function compat: ${nameof(functionName())}")
-    println("property: ${nameof(::propertyName)}")
-    println("property compat: ${nameof(propertyName)}")
-    println("object: ${nameof(ObjectName::class)}")
-    println("variable: ${nameof(variableName)}")
+    println("class: ${nameOf(ClassName::class)}")
+    println("function: ${nameOf(::functionName)}")
+    println("local function: ${nameOf(::localFunctionName)}")
+    println("function compat: ${nameOf(functionName())}")
+    println("property: ${nameOf(::propertyName)}")
+    println("property compat: ${nameOf(propertyName)}")
+    println("object: ${nameOf(ObjectName::class)}")
+    println("object compat: ${nameOf(ObjectName)}")
+    println("variable: ${nameOf(variableName)}")
+}
+
+//fun testComptimeError() {
+//    comptimeError()
+//}
+
+fun main() {
+    testNameOf()
 }

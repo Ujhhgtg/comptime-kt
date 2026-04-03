@@ -16,7 +16,7 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
-rootProject.name = "nameof-kt"
+rootProject.name = "comptime-kt"
 include("plugin")
 include("api")
 include("sample")
