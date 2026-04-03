@@ -1,4 +1,7 @@
-package dev.ujhhgtg.comptime
+package dev.ujhhgtg.comptime.sample
+
+import dev.ujhhgtg.comptime.This
+import dev.ujhhgtg.comptime.nameOf
 
 class ClassName
 
@@ -24,10 +27,28 @@ fun testNameOf() {
     println("variable: ${nameOf(variableName)}")
 }
 
+object SomeClass {
+    fun printThisClass() {
+        println("this class name: ${This.Class.name}")
+        println("this class simple name: ${This.Class.simpleName}")
+    }
+
+    fun printThisMethod() {
+        println("this method name: ${This.Method.name}")
+        println("this method simple name: ${This.Method.simpleName}")
+    }
+}
+
+fun testThis() {
+    SomeClass.printThisClass()
+    SomeClass.printThisMethod()
+}
+
 //fun testComptimeError() {
 //    comptimeError()
 //}
 
 fun main() {
     testNameOf()
+    testThis()
 }

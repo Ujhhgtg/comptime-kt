@@ -1,54 +1,94 @@
-# nameof-kt
+# comptime-kt
 
-A Kotlin Compiler Plugin that provides a `nameof()` function to retrieve the names of classes, properties, and functions at **compile time**.
+A Kotlin Compiler Plugin that provides utilities for retrieving names and metadata of classes, properties, and functions at **compile time**.
 
-Unlike reflection-based solutions, `nameof-kt` transforms calls into constant strings during the IR (Intermediate Representation) phase, ensuring zero runtime overhead and full compatibility with R8/ProGuard.
+By transforming IR (Intermediate Representation) during compilation, `comptime-kt` replaces specific calls and property accesses with constant string literals. This ensures **zero runtime overhead**, improved performance over reflection, and full compatibility with R8/ProGuard.
 
 
 ## Features
 
-* **Type-safe:** Uses Kotlin references (`::class`, `::member`) instead of hardcoded strings.
-* **Zero Runtime Cost:** The function call is replaced by a string literal (e.g., `"MyClass"`) at compile time.
-* **Refactoring Friendly:** Renaming a class or function via your IDE will automatically update the `nameof` result.
-* **K2 Compatible:** Built to support the next-generation Kotlin compiler.
-
+*   **Type-safe**: Uses Kotlin references (`::class`, `::member`) instead of hardcoded strings.
+*   **Zero Runtime Cost**: Calls are replaced by string literals (e.g., `"MyClass"`) at compile time.
+*   **Context Aware**: Access the name of the "current" class or method automatically using the `This` scope.
+*   **Refactoring Friendly**: Renaming a class or function via your IDE will automatically update the result.
+*   **K2 Compatible**: Built to support the next-generation Kotlin compiler.
 
 ## Usage
 
-Simply wrap a class, function, or property reference with `nameof()`:
+### 1. `nameOf()`
+Simply wrap a class, function, variable, or property reference with `nameOf()`:
 
 ```kotlin
+import dev.ujhhgtg.comptime.nameOf
+
 class ClassName
-
 fun functionName() {}
-
-val propertyName: String
-get() = ""
-
-object ObjectName
+val propertyName = "value"
 
 fun main() {
-  fun localFunctionName() {}
-  val variableName = ""
-
-  println("class: ${nameof(ClassName::class)}")
-  println("function: ${nameof(::functionName)}")
-  println("local function: ${nameof(::localFunctionName)}")
-  println("function compat: ${nameof(functionName())}")
-  println("property: ${nameof(::propertyName)}")
-  println("property compat: ${nameof(propertyName)}")
-  println("object: ${nameof(ObjectName::class)}")
-  println("variable: ${nameof(variableName)}")
+    println(nameOf(ClassName::class))  // "ClassName"
+    println(nameOf(::functionName))    // "functionName"
+    println(nameOf(::propertyName))    // "propertyName"
 }
-
 ```
 
+### 2. `This` Context
+Retrieve metadata about the enclosing scope without boilerplate:
+
+```kotlin
+package dev.example
+
+import dev.ujhhgtg.comptime.This
+
+class MyService {
+    fun processData() {
+        // Full qualified names
+        println(This.Class.name)   // "dev.example.MyService"
+        println(This.Method.name)  // "dev.example.MyService.processData"
+
+        // Simple names
+        println(This.Class.simpleName)  // "MyService"
+        println(This.Method.simpleName) // "processData"
+    }
+}
+```
+
+## Full Example
+
+```kotlin
+package dev.ujhhgtg.comptime.sample
+
+import dev.ujhhgtg.comptime.This
+import dev.ujhhgtg.comptime.nameOf
+
+class ClassName
+fun functionName() {}
+object ObjectName
+
+fun test() {
+    val variableName = "hello"
+
+    println("class: ${nameOf(ClassName::class)}")   // "ClassName"
+    println("function: ${nameOf(::functionName)}")  // "functionName"
+    println("object: ${nameOf(ObjectName)}")        // "ObjectName"
+    println("variable: ${nameOf(variableName)}")    // "variableName"
+}
+
+object Logger {
+    fun logInfo() {
+        // Useful for automated logging tags
+        val tag = This.Class.simpleName
+        val method = This.Method.simpleName
+        println("[$tag::$method] Logic executed.") 
+        // Output: [Logger::logInfo] Logic executed.
+    }
+}
+```
+
+---
 
 ## Limitations
 
-- You cannot mark a `val CONST_STRING = nameof(ClassName::class)` as `const`, however for `private val`s,
-  at the bytecode level, `private const val` is completely equal to `private val`.
-
-- The stub `nameof()` function's argument type is constrained at compile-time instead of lint-time,
-  since compatability is provided for `object` types, therefore its argument type is `Any` instead of
-  `KClass`/`KFunction`/`KProperty`.
+- **Const constraints**: You cannot mark a `val x = nameOf(ClassName::class)` as `const`. However, for `private val`s, the resulting bytecode is effectively identical to a constant string.
+- **Argument Type**: To maintain compatibility with objects, classes, and members simultaneously, the `nameOf` stub accepts `Any`. Validation occurs at compile-time during the IR transformation.
+- **Scope**: `This.Class` and `This.Method` must be called within an actual class or function scope respectively to resolve correctly.
