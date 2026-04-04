@@ -4,14 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="81697a1b-e7bd-47ef-84d8-ca9edc0fe1fe" name="更改" comment="update&#10;rename to comptime-kt&#10;update deps&#10;new feat: This.{Class,Method}.{name,simpleName}">
+    <list default="true" id="81697a1b-e7bd-47ef-84d8-ca9edc0fe1fe" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/api/src/main/kotlin/StubFunctions.kt" beforeDir="false" afterPath="$PROJECT_DIR$/api/src/main/kotlin/Stubs.kt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeCompilerPluginRegistrar.kt" beforeDir="false" afterPath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeCompilerPluginRegistrar.kt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeIrGenerationExtension.kt" beforeDir="false" afterPath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeIrGenerationExtension.kt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeTransformer.kt" beforeDir="false" afterPath="$PROJECT_DIR$/plugin/src/main/kotlin/dev/ujhhgtg/comptime/ComptimeTransformer.kt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sample/src/main/kotlin/Main.kt" beforeDir="false" afterPath="$PROJECT_DIR$/sample/src/main/kotlin/Main.kt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -53,18 +48,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "Ujhhgtg"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;Ujhhgtg&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "git@github.com:Ujhhgtg/nameof-kt.git",
-    "accountId": "74c21a6c-9621-4b72-8848-b1a6cbbb1191"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;git@github.com:Ujhhgtg/nameof-kt.git&quot;,
+    &quot;accountId&quot;: &quot;74c21a6c-9621-4b72-8848-b1a6cbbb1191&quot;
   }
-}]]></component>
+}</component>
   <component name="ProblemsViewState">
     <option name="selectedTabId" value="CurrentFile" />
   </component>
@@ -80,6 +75,7 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "Gradle.comptime-kt [:sample:dev.ujhhgtg.comptime.MainKt.main()].executor": "Run",
+    "Gradle.comptime-kt [:sample:dev.ujhhgtg.comptime.sample.MainKt.main()].executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.cidr.known.project.marker": "true",
     "RunOnceActivity.git.unshallow": "true",
@@ -131,7 +127,8 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1773811469996</updated>
-      <workItem from="1775219037419" duration="2339000" />
+      <workItem from="1775219037419" duration="2392000" />
+      <workItem from="1775223104735" duration="171000" />
     </task>
     <task id="LOCAL-00002" summary="update deps">
       <option name="closed" value="true" />
@@ -149,7 +146,15 @@
       <option name="project" value="LOCAL" />
       <updated>1775219903573</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="update&#10;rename to comptime-kt&#10;update deps&#10;new feat: This.{Class,Method}.{name,simpleName}">
+      <option name="closed" value="true" />
+      <created>1775222973996</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1775222973996</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
