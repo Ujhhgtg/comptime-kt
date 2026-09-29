@@ -1,5 +1,6 @@
 package dev.ujhhgtg.comptime.compiler
 
+import dev.ujhhgtg.comptime.protocol.BlockCompiler
 import dev.ujhhgtg.comptime.protocol.JobLayout
 import dev.ujhhgtg.comptime.protocol.Json
 import dev.ujhhgtg.comptime.protocol.asArray
@@ -116,6 +117,26 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
         // ---------------------------------------------------------------- evaluate
 
         private fun evaluate(blocks: List<Block>, stdlib: File): Map<Block, ResultValue>? {
+            val cache = options.cacheDir?.let { ResultCache(it, options, stdlib, ENCODER_SOURCE) }
+            val keys = blocks.associateWith { cache?.key(it.synthetic.text) }
+            val values = LinkedHashMap<Block, ResultValue>()
+            val misses = blocks.filter { block ->
+                val cached = keys[block]?.let { cache?.get(it) }
+                if (cached != null) values[block] = ResultValue.decode(cached)
+                cached == null
+            }
+            if (misses.isEmpty()) return values
+
+            val fresh = run(misses, stdlib) ?: return null
+            for ((block, bytes) in fresh) {
+                values[block] = ResultValue.decode(bytes)
+                keys[block]?.let { cache?.put(it, bytes) }
+            }
+            return values
+        }
+
+        /** Runs [blocks] in one job and returns each block's encoded result, or `null` after reporting errors. */
+        private fun run(blocks: List<Block>, stdlib: File): Map<Block, ByteArray>? {
             val layout = JobLayout(File(options.jobDir, "job"))
             layout.root.deleteRecursively()
             layout.src.mkdirs()
@@ -123,11 +144,22 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
 
             for (block in blocks) layout.source(block.id).writeText(block.synthetic.text)
             File(layout.src, "encoder.kt").writeText(ENCODER_SOURCE)
+
+            // Compile in this process when we can: the Kotlin daemon is warm, a fresh host JVM isn't.
+            val precompiled = options.inProcessCompile && compileInProcess(layout, stdlib)
+            if (precompiled && Json.parse(layout.compileResult.readText()).asObject()["success"] != true) {
+                reportCompileErrors(blocks, Json.parse(layout.compileResult.readText()).asObject())
+                return null
+            }
+
             layout.manifest.writeText(Json.write(linkedMapOf(
                 "version" to 1L,
                 "stdlib" to stdlib.absolutePath,
                 "timeoutSeconds" to options.timeoutSeconds,
                 "compilerArgs" to options.hostCompilerArgs,
+                "precompiled" to precompiled,
+                "inputHash" to options.inputHash,
+                "env" to options.env.keys.sorted(),
                 "blocks" to blocks.map { b ->
                     linkedMapOf(
                         "id" to b.id,
@@ -157,11 +189,14 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
                 return null
             }
 
-            val values = LinkedHashMap<Block, ResultValue>()
+            val results = LinkedHashMap<Block, ByteArray>()
             var running: Block? = null
             for (block in blocks) {
                 when {
-                    layout.result(block.id).isFile -> values[block] = ResultValue.decode(layout.result(block.id).readBytes())
+                    layout.result(block.id).isFile -> {
+                        results[block] = layout.result(block.id).readBytes()
+                        layout.output(block.id).takeIf { it.isFile }?.let { reportOutput(block, Json.parse(it.readText()).asObject()) }
+                    }
                     layout.error(block.id).isFile -> reportBlockError(block, Json.parse(layout.error(block.id).readText()).asObject())
                     layout.started(block.id).isFile -> running = block
                     else -> error(block, when {
@@ -178,8 +213,36 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
                     else -> hostDiedMessage(outcome, layout, "while running this block")
                 })
             }
-            if (values.size != blocks.size) return null
-            return values
+            if (results.size != blocks.size) return null
+            return results
+        }
+
+        /**
+         * Compiles the job's sources with the compiler this plugin runs in. Returns false, leaving the compile to the
+         * host, if that fails for any reason other than errors in the blocks themselves.
+         */
+        private fun compileInProcess(layout: JobLayout, stdlib: File): Boolean = try {
+            BlockCompiler(layout, stdlib, options.hostJdkHome, options.hostCompilerArgs).compile()
+            val result = Json.parse(layout.compileResult.readText()).asObject()
+            val crashed = result["diagnostics"].asArray().any { it.asObject()["severity"] == "exception" }
+            if (crashed) {
+                layout.compileResult.delete()
+                layout.classes.deleteRecursively()
+            }
+            !crashed
+        } catch (e: Throwable) {
+            layout.compileResult.delete()
+            layout.classes.deleteRecursively()
+            false
+        }
+
+        private fun reportOutput(block: Block, output: Map<String, Any?>) {
+            val text = buildString {
+                append("comptime block printed:")
+                (output["stdout"] as? String)?.takeIf { it.isNotEmpty() }?.let { append("\n").append(it.trimEnd().prependIndent("    ")) }
+                (output["stderr"] as? String)?.takeIf { it.isNotEmpty() }?.let { append("\n  stderr:\n").append(it.trimEnd().prependIndent("    ")) }
+            }
+            context.diagnosticReporter.at(block.site.call, block.site.file).report(ComptimeErrors.COMPTIME_OUTPUT, text)
         }
 
         private fun hostDiedMessage(outcome: HostOutcome, layout: JobLayout, what: String): String = when {
@@ -226,6 +289,7 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
                 if (message != null) append(": ").append(message)
                 val frames = err["stackTrace"].asArray().map { it.asObject() }
                 val synthetic = block.synthetic
+                var excerptShown = false
                 for (frame in frames.take(30)) {
                     val cls = frame["cls"] as String
                     val file = frame["file"] as? String
@@ -233,8 +297,15 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
                     if (file == "${block.id}.kt") {
                         // Frames outside the lambda are the synthetic entry point and shadow `comptime`.
                         if (line !in synthetic.firstLambdaLine..synthetic.lastLambdaLine) continue
+                        val originalLine = line + synthetic.lineOffset
                         append("\n    at ")
-                        append(File(block.source.path).name).append(':').append(line + synthetic.lineOffset).append(" (comptime block)")
+                        append(File(block.source.path).name).append(':').append(originalLine).append(" (comptime block)")
+                        if (!excerptShown) {
+                            // The line that threw, so the report reads without opening the file.
+                            excerptShown = true
+                            val text = block.source.text.lines().getOrNull(originalLine - 1)?.trim()
+                            if (!text.isNullOrEmpty()) append("\n        > ").append(text)
+                        }
                     } else {
                         append("\n    at ")
                         append(cls).append('.').append(frame["method"]).append('(').append(file ?: "Unknown Source")
@@ -256,15 +327,24 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
 
         private fun replace(values: Map<Block, ResultValue>) {
             val builder = ValueBuilder(context)
-            val materializer = Materializer(context, builder)
+            val materializer = Materializer(context, builder, options.sizeLimitBytes.toLong())
             val replacements = IdentityHashMap<IrCall, IrExpression>()
             for ((block, value) in values) {
-                val collection = block.type !is ResultType.Scalar
-                if (collection && value !is ResultValue.Null) {
-                    val size = ResultValue.estimateBytecode(value)
-                    if (size > options.sizeLimitBytes) {
-                        error(block, "comptime result is too large: about ${size / 1024} KB of bytecode, over the ${options.sizeLimitBytes / 1024} KB limit")
-                        continue
+                if (block.type !is ResultType.Scalar && value !is ResultValue.Null) {
+                    if (materializer.isInline(block.site, block.type, value)) {
+                        // Built in place inside an inline function: it shares the caller's method, so it can't be split.
+                        val size = ResultValue.estimateBytecode(value)
+                        if (size > options.sizeLimitBytes) {
+                            error(block, "comptime result is too large to build inside an inline function: about ${size / 1024} KB of bytecode, " +
+                                "over the ${options.sizeLimitBytes / 1024} KB limit; move it to a property outside the inline function")
+                            continue
+                        }
+                    } else {
+                        val constants = ResultValue.constantPoolEntries(value)
+                        if (constants > MAX_CONSTANTS) {
+                            error(block, "comptime result is too large: it needs about $constants class-file constants, over the limit of $MAX_CONSTANTS for one class")
+                            continue
+                        }
                     }
                 }
                 replacements[block.site.call] = materializer.materialize(block.site, block.type, value).also {
@@ -295,6 +375,9 @@ class ComptimeIrGenerationExtension(private val optionsProvider: () -> ComptimeO
     }
 
     private companion object {
+        /** Class-file constant pool entries a holder class may use; the JVM's hard limit is 65535. */
+        const val MAX_CONSTANTS = 60_000
+
         val CALL_PREFIX = Regex(
             """\s*(?:dev\s*\.\s*ujhhgtg\s*\.\s*comptime\s*\.\s*)?comptime\s*(?:<[\s\S]*>)?\s*(?:\(\s*(?:block\s*=\s*)?)?(?<label>[\p{L}_][\p{L}\p{N}_]*@)?\s*"""
         )

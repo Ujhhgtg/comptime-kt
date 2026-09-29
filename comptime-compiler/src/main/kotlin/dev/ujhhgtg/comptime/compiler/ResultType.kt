@@ -75,43 +75,52 @@ sealed class ResultType {
         private val primitiveArraysByName = ScalarKind.entries.filter { it.isPrimitive }.associateBy { it.arrayName!! }
 
         /** Maps [type] to a [ResultType], or explains which part of it isn't supported. */
-        fun of(type: IrType): Analysis = try {
-            Analysis.Supported(analyze(type))
+        fun of(type: IrType): Analysis = analysis { analyze(type) }
+
+        /** Runs [block], turning an [unsupported] call inside it into [Analysis.Unsupported]. */
+        internal fun analysis(block: () -> ResultType): Analysis = try {
+            Analysis.Supported(block())
         } catch (e: Unsupported) {
             Analysis.Unsupported(e.part)
         }
 
-        private class Unsupported(val part: String) : Exception(null, null, false, false)
+        internal class Unsupported(val part: String) : Exception(null, null, false, false)
+
+        internal fun unsupported(part: String): Nothing = throw Unsupported(part)
 
         private fun analyze(type: IrType): ResultType {
-            val simple = type as? IrSimpleType ?: throw Unsupported(type.toString())
-            val nullable = simple.isMarkedNullable() || simple.hasAnnotation(FLEXIBLE_NULLABILITY)
-            val flexibleMutability = simple.hasAnnotation(FLEXIBLE_MUTABILITY)
-            val name = simple.classFqName?.asString() ?: throw Unsupported(renderLoosely(simple))
-
-            fun arg(i: Int): ResultType {
-                val projection = simple.arguments.getOrNull(i) as? IrTypeProjection
-                    ?: throw Unsupported("star projection in ${renderLoosely(simple)}")
-                return analyze(projection.type)
+            val simple = type as? IrSimpleType ?: unsupported(type.toString())
+            val name = simple.classFqName?.asString() ?: unsupported(simple.classifier.toString())
+            return shape(
+                name = name,
+                nullable = simple.isMarkedNullable() || simple.hasAnnotation(FLEXIBLE_NULLABILITY),
+                flexibleMutability = simple.hasAnnotation(FLEXIBLE_MUTABILITY),
+            ) { i ->
+                val projection = simple.arguments.getOrNull(i) as? IrTypeProjection ?: unsupported("star projection in $name")
+                analyze(projection.type)
             }
+        }
 
+        /**
+         * The [ResultType] for a class [name] and its type arguments ([arg]), shared by the IR analysis and the FIR
+         * checker so both apply the same rules. Java's `(Mutable)List` is read-only when [flexibleMutability].
+         */
+        internal fun shape(name: String, nullable: Boolean, flexibleMutability: Boolean, arg: (Int) -> ResultType): ResultType {
             scalarsByName[name]?.let { return Scalar(it, nullable) }
             primitiveArraysByName[name]?.let { return PrimitiveArray(it, nullable) }
             return when (name) {
                 "kotlin.collections.List" -> ListOf(arg(0), nullable)
                 "kotlin.collections.Set" -> SetOf(arg(0), nullable)
                 "kotlin.collections.Map" -> MapOf(arg(0), arg(1), nullable)
-                "kotlin.collections.MutableList" -> if (flexibleMutability) ListOf(arg(0), nullable) else throw Unsupported(mutableHint(name))
-                "kotlin.collections.MutableSet" -> if (flexibleMutability) SetOf(arg(0), nullable) else throw Unsupported(mutableHint(name))
-                "kotlin.collections.MutableMap" -> if (flexibleMutability) MapOf(arg(0), arg(1), nullable) else throw Unsupported(mutableHint(name))
+                "kotlin.collections.MutableList" -> if (flexibleMutability) ListOf(arg(0), nullable) else unsupported(mutableHint(name))
+                "kotlin.collections.MutableSet" -> if (flexibleMutability) SetOf(arg(0), nullable) else unsupported(mutableHint(name))
+                "kotlin.collections.MutableMap" -> if (flexibleMutability) MapOf(arg(0), arg(1), nullable) else unsupported(mutableHint(name))
                 "kotlin.Array" -> ArrayOf(arg(0), nullable)
-                else -> throw Unsupported(name)
+                else -> unsupported(name)
             }
         }
 
         private fun mutableHint(name: String) = "$name (declare the result as a read-only ${name.removePrefix("kotlin.collections.Mutable")})"
-
-        private fun renderLoosely(type: IrSimpleType): String = type.classFqName?.asString() ?: type.classifier.toString()
 
         private fun StringBuilder.appendDescriptor(t: ResultType) {
             if (t.nullable) append('?')

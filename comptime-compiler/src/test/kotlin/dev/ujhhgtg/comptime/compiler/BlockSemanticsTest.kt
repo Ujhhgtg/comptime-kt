@@ -112,7 +112,7 @@ class BlockSemanticsTest {
 
             fun explicitType() = comptime<Long> { 7 }
 
-            fun nested() = comptime { comptime { 20 } + comptime { 1 } * 2 }
+            fun nested() = comptime { comptime { 20 } + comptime { 1 } * 2 + comptime { mutableListOf(0) }.size - 1 }
 
             fun qualifiedCall() = dev.ujhhgtg.comptime.comptime { "fq" }
 
@@ -176,9 +176,9 @@ class BlockSemanticsTest {
                 fun flavor() = comptime { System.getenv("COMPTIME_FLAVOR") }
                 fun unset() = comptime { System.getenv("PATH") }
             """.trimIndent(),
-            multiOptions = listOf("env" to "COMPTIME_FLAVOR=prod", "envUnset" to "PATH"),
+            multiOptions = listOf("env" to "COMPTIME_FLAVOR=pr%2Cod%25", "envUnset" to "PATH"),
         )
-        assertEquals("prod", r.call("flavor"))
+        assertEquals("pr,od%", r.call("flavor")) // encoded the way the Gradle plugin passes it
         assertEquals(null, r.call("unset"))
     }
 

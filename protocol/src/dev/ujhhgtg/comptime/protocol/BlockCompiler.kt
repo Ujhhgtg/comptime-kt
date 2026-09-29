@@ -1,7 +1,5 @@
-package dev.ujhhgtg.comptime.host
+package dev.ujhhgtg.comptime.protocol
 
-import dev.ujhhgtg.comptime.protocol.JobLayout
-import dev.ujhhgtg.comptime.protocol.Json
 import org.jetbrains.kotlin.cli.common.ExitCode
 import org.jetbrains.kotlin.cli.common.arguments.K2JVMCompilerArguments
 import org.jetbrains.kotlin.cli.common.arguments.parseCommandLineArguments
@@ -13,15 +11,21 @@ import org.jetbrains.kotlin.config.Services
 import java.io.File
 
 /**
- * Compiles every synthetic source in `src/` with one [K2JVMCompiler] call, against only the JDK the host runs on
- * and the given stdlib jar. Diagnostics go to `out/compile.json`.
+ * Compiles every synthetic source in `src/` with one [K2JVMCompiler] call, against only the JDK at [jdkHome] and the
+ * given stdlib jar. Diagnostics go to `out/compile.json`.
+ *
+ * Shared as source: the compiler plugin runs it in-process (inside the warm Kotlin daemon), and the host runs it
+ * when the plugin couldn't.
  */
 internal class BlockCompiler(
     private val layout: JobLayout,
     private val stdlib: File,
+    private val jdkHome: File,
     private val extraArgs: List<String>,
 ) {
     fun compile(): Boolean {
+        layout.classes.mkdirs()
+        layout.out.mkdirs()
         val sources = layout.src.listFiles { f -> f.extension == "kt" }.orEmpty().sortedBy { it.name }
         val diagnostics = ArrayList<Map<String, Any?>>()
         val collector = object : MessageCollector {
@@ -46,7 +50,7 @@ internal class BlockCompiler(
             "-no-reflect",
             "-nowarn",
             "-classpath", stdlib.absolutePath,
-            "-jdk-home", System.getProperty("java.home"),
+            "-jdk-home", jdkHome.absolutePath,
             "-module-name", "comptime-job",
             "-d", layout.classes.absolutePath,
         ) + extraArgs + sources.map { it.absolutePath }

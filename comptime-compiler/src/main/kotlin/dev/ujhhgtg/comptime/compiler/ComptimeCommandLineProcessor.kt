@@ -20,11 +20,16 @@ class ComptimeCommandLineProcessor : CommandLineProcessor {
         CliOption("stdlib", "<jar>", "kotlin-stdlib jar for blocks (default: found on the classpath)", required = false),
         CliOption("sizeLimit", "<bytes>", "Estimated bytecode limit per baked value", required = false),
         CliOption("inputHash", "<hash>", "Hash of declared inputs; changing it forces a full rebuild", required = false),
+        CliOption("cacheDir", "<dir>", "Result cache directory; omit to disable the cache", required = false),
+        CliOption("inProcessCompile", "true|false", "Compile blocks in the compiler process (default true)", required = false),
     )
 
-    override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) {
+    override fun processOption(option: AbstractCliOption, value: String, configuration: CompilerConfiguration) =
+        apply(option.optionName, decode(value), configuration)
+
+    private fun apply(name: String, value: String, configuration: CompilerConfiguration) {
         val keys = ComptimeConfigurationKeys
-        when (option.optionName) {
+        when (name) {
             "hostClasspath" -> configuration.put(keys.HOST_CLASSPATH, value.split(File.pathSeparatorChar).filter { it.isNotEmpty() })
             "javaExecutable" -> configuration.put(keys.JAVA_EXECUTABLE, value)
             "timeout" -> configuration.put(keys.TIMEOUT, value)
@@ -35,11 +40,19 @@ class ComptimeCommandLineProcessor : CommandLineProcessor {
             "stdlib" -> configuration.put(keys.STDLIB, value)
             "sizeLimit" -> configuration.put(keys.SIZE_LIMIT, value)
             "inputHash" -> configuration.put(keys.INPUT_HASH, value)
-            else -> error("Unknown comptime option ${option.optionName}")
+            "cacheDir" -> configuration.put(keys.CACHE_DIR, value)
+            "inProcessCompile" -> configuration.put(keys.IN_PROCESS_COMPILE, value)
+            else -> error("Unknown comptime option $name")
         }
     }
 
     companion object {
         const val PLUGIN_ID = "dev.ujhhgtg.comptime"
+
+        /**
+         * `-P` splits its value on commas, so the Gradle plugin percent-encodes `%` and `,` in option values (env
+         * values and paths may contain either).
+         */
+        fun decode(value: String): String = value.replace("%2C", ",").replace("%25", "%")
     }
 }

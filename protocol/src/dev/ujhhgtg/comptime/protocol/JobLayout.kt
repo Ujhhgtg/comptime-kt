@@ -20,6 +20,9 @@ internal class JobLayout(val root: File) {
     fun result(id: String) = File(out, "$id.bin")
     fun error(id: String) = File(out, "$id.err")
 
+    /** Captured stdout and stderr of a block that succeeded, when it printed anything. */
+    fun output(id: String) = File(out, "$id.out")
+
     companion object {
         const val HOST_MAIN = "dev.ujhhgtg.comptime.host.HostMain"
         const val ENTRY_FUNCTION = "comptimeEntry"

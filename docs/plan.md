@@ -4,7 +4,7 @@ Sep 29, 2026 · @Jack Scott · revised the same day after review (see [Revision 
 
 Target toolchain: Kotlin 2.4.20 (latest stable at time of writing), K2, Gradle. Package, Maven group and Gradle plugin ID: `dev.ujhhgtg.comptime`. Statements marked ✓ were checked against the Kotlin 2.4.20 compiler and Kotlin Gradle plugin sources.
 
-**Status:** phases 1 and 2 are implemented and tested; the spike's answers are in [spike.md](spike.md). Phase 3 (`inputs` and `env` in the Gradle DSL) and phase 4 (`jdk`) are next: the compiler plugin already accepts `env`, `envUnset` and `inputHash` options, but the Gradle plugin only exposes `timeout` so far.
+**Status:** all five phases are implemented and tested. The spike's answers are in [spike.md](spike.md), and what implementing phases 3–5 changed is under [Implementation notes (phases 3–5)](#implementation-notes-phases-35).
 
 ## Overview
 
@@ -223,6 +223,8 @@ fun comptimeEntry(): ByteArray = comptimegen.enc.encode(
 
 The host is a standalone JVM program that the plugin always runs as a child process, even when no JDK is pinned. A child process gives killable timeouts, protection against `System.exit`, and one code path for every JDK choice.
 
+Since phase 5, the plugin compiles the blocks itself, in-process, with the same `BlockCompiler` the host has (shared as source), against the host JDK's `-jdk-home`. The Kotlin daemon is warm and a fresh host JVM isn't, so this removes most of a job's cost. The manifest then says `precompiled` and the host only runs the blocks. If the in-process compile fails for any reason other than errors in the blocks, the host compiles as before; `inProcessCompile=false` forces that.
+
 ### Launch
 
 ```
@@ -246,16 +248,17 @@ job/
                      timeout, stdlib path, language settings
   src/b0.kt ...      one synthetic file per block
   src/encoder.kt     shared result encoder
-  classes/           host compile output
-  out/compile.json   host compile diagnostics, if any: file, line, column, severity, message
+  classes/           compile output (plugin or host)
+  out/compile.json   compile diagnostics, if any: file, line, column, severity, message
   out/b0.started     written just before block 0 runs
   out/b0.bin         encoded result, or
   out/b0.err         error kind + message + stack trace + captured stdout/stderr
+  out/b0.out         captured stdout/stderr of a block that succeeded, if it printed anything
 ```
 
 ### Host steps
 
-1. Compile everything in `src/` with one programmatic `K2JVMCompiler` call and a custom `MessageCollector`, using:
+1. Unless the manifest says `precompiled`, compile everything in `src/` with one programmatic `K2JVMCompiler` call and a custom `MessageCollector`, using:
    - `-no-stdlib`, `-no-reflect` and `-nowarn`, with the stdlib jar explicitly on the classpath, and `-jdk-home` set to the host's own JDK;
    - the module's language version and enabled language features, read from its `LanguageVersionSettings`;
    - opt-in to every stdlib opt-in marker, since the main compile already enforced opt-ins;
@@ -264,7 +267,7 @@ job/
    Diagnostics go to `out/compile.json` with synthetic positions.
 2. For each block, create a `URLClassLoader` holding only the stdlib jar and `classes/`, with `ClassLoader.getPlatformClassLoader()` as parent.
 3. Write `out/bN.started`, then call `comptimegen.bN`'s `comptimeEntry()` reflectively on a worker thread, capturing `System.out` and `System.err`. Swapping the global streams is safe because blocks run one at a time.
-4. Write `out/bN.bin` on success, or `out/bN.err` on failure.
+4. Write `out/bN.bin` on success (plus `out/bN.out` if the block printed anything), or `out/bN.err` on failure.
 5. Once every block has an output file, flush and call `Runtime.getRuntime().halt(0)`, so threads or shutdown hooks left behind by blocks can't keep the host alive.
 
 The plugin enforces the timeout on the whole process, host compile included, and kills it on expiry. A block with a `.started` marker but no output is reported as the one that timed out, crashed, or called `System.exit`. Blocks without a marker are reported as never run.
@@ -311,17 +314,18 @@ Functions are resolved with `pluginContext.finderForBuiltins()`, picking the var
 Following [How values are baked](#how-values-are-baked):
 
 - **Inline constants** replace the call directly.
-- **Holders.** Each cached collection gets a private synthetic class (`IrDeclarationOrigin` marked synthetic, so it's `ACC_SYNTHETIC` in bytecode) with one static final field set in its `<clinit>`. The call site reads the field. JVM class initialization makes this lazy and thread-safe.
-- **Builders.** Each value containing an array gets a private synthetic function that builds it. The call site calls that function.
+- **Holders.** Every other value gets a private synthetic class `<File>$comptime$<n>` (`IrDeclarationOrigin` marked synthetic, so it's `ACC_SYNTHETIC` in bytecode).
+  - A cached collection is one static final `VALUE` field set in the class's `<clinit>`; the call site reads the field. JVM class initialization makes this lazy and thread-safe.
+  - A value containing an array is a static `build()` method; the call site calls it on every evaluation.
 - **In place.** Inside a non-private inline function, the building expression replaces the call directly.
 
-Holders and builders give every value its own method, which is what makes the size limit below a per-value limit.
+Every holder has its own class, so its own methods and constant pool, which is what lets large values be split (below).
 
 ### Size limit
 
 - **Strings:** no limit is needed. The JVM backend already splits string constants over the 64 KB constant-pool limit and joins them with a `StringBuilder` at runtime ✓. Non-const properties never get a `ConstantValue` attribute ✓.
-- **Collections and arrays:** the JVM caps a method at 64 KB of bytecode. A holder or builder contains exactly one value, so a value whose estimated bytecode exceeds a threshold (default 48 KB) is a compile error, with the estimate in the message. Values built in place share their enclosing method, so several large ones in one inline function can still overflow. Phase 1 doesn't handle that.
-- **Deferred:** splitting a large value across several methods, or storing it as an encoded resource decoded at runtime.
+- **Collections and arrays in holders:** the JVM caps a method at 64 KB of bytecode. When building a value would take more than a per-method budget (`sizeLimit`, default 48 KB), chunks of its elements move into private static `part$<k>` helpers in the holder class, each returning an array, and the container is built from spreads: `listOf(*part$0(), *part$1())`. An element too big for one method gets a helper of its own, recursively. The remaining limit is the holder class's constant pool (65 535 entries): a value needing more than 60 000 entries for its constants is a compile error.
+- **Values built in place** (inside inline functions) share their caller's method and can't be split, so an estimate over the budget is a compile error there.
 
 ## Gradle plugin and DSL
 
@@ -338,13 +342,16 @@ comptime {
     inputs.from("data/", "schema.sql")    // tracked files and directories
     env.add("BUILD_FLAVOR")               // tracked env vars
     timeout.set(Duration.ofSeconds(30))   // java.time.Duration; whole host process, compile included; default 60 s
+    cache.set(false)                      // optional; default true, stored under build/comptime
 }
 ```
 
 ### What it does
 
 - **Dependencies:** adds `comptime-runtime` as `compileOnly` to every JVM compilation, tests included. Every call is rewritten, so nothing references it at runtime. Resolves the host plus `kotlin-compiler-embeddable` into a detached configuration.
-- **JDK pinning:** resolves `jdk` through Gradle's `JavaToolchainService` (with auto-provisioning if the build allows it) and passes the launcher's executable path.
+- **JDK pinning:** resolves `jdk` through Gradle's `JavaToolchainService` (with auto-provisioning if the build allows it) and passes the launcher's executable path. Unpinned, the compiler plugin uses the compile's `-jdk-home`.
+- **Result cache:** unless `cache` is false, passes `build/comptime/<target>/<compilation>/cache` as the cache directory. `clean` empties it.
+- **Input hash:** computed by a Gradle `ValueSource` over the declared inputs, so the configuration cache re-checks it on every build.
 - **Options passed to the compiler plugin:**
   - Host classpath, java executable, timeout, module directory and job directory go as `InternalSubpluginOption`. Every plain option value becomes an `@Input` string ✓, and absolute paths in the build-cache key would break cache relocation.
   - The input hash and the env var names and values go as plain options, so they are task inputs.
@@ -356,7 +363,11 @@ The applicability check limits the plugin to JVM compilations; other platforms g
 
 ## Errors and diagnostics
 
-Every failure is a compile error reported through `IrPluginContext.diagnosticReporter` (`messageCollector` is deprecated in 2.4.20 ✓). Errors are located at the original `comptime` call, or, for reference-check errors, at the offending reference. A failed block's call is left untouched, so the backend still sees valid IR, and the build fails at the end of compilation. Diagnostics stay minimal in phase 1: no FIR checker, nothing in the IDE until you build.
+Every failure is a compile error, located at the original `comptime` call or, for reference-check errors, at the offending reference.
+
+- **During analysis:** a FIR checker (phase 5) reports the checks that need only the call: a non-lambda argument, an import alias, an unsupported result type. These errors stop the compile before IR, and an IDE that loads the plugin can show them while typing.
+- **In IR:** everything else goes through `IrPluginContext.diagnosticReporter` (`messageCollector` is deprecated in 2.4.20 ✓). A failed block's call is left untouched, so the backend still sees valid IR, and the build fails at the end of compilation.
+- **Output:** what a successful block printed is reported at info level (Gradle shows it with `--info`). A cache hit replays nothing.
 
 | Failure | Reported as |
 | --- | --- |
@@ -364,11 +375,11 @@ Every failure is a compile error reported through `IrPluginContext.diagnosticRep
 | Forbidden reference | The symbol and why it's not allowed (project declaration, captured local, outer `this`), at the reference |
 | Declared type not allowed | "comptime result type X is not supported", naming the offending part |
 | Host compile error in a block | The compiler message from `out/compile.json`, with its synthetic line mapped back to the original file and line |
-| Exception thrown by a block | Exception type and message, the stack trace trimmed to block frames with lines mapped back, captured stdout/stderr |
+| Exception thrown by a block | Exception type and message, the stack trace trimmed to block frames with lines mapped back, the source line that threw, captured stdout/stderr |
 | Timeout | "comptime timed out after N s while running block X (file:line)", plus blocks that never ran |
 | Host exited mid-run | "host exited with code N while running block X"; with code 0, a hint that the block called `System.exit` |
 | Value doesn't match declared type | The path inside the value and the expected type |
-| Result too large | The estimated bytecode size and the limit |
+| Result too large | In an inline function: the estimated bytecode size and the limit. Elsewhere: the constant pool entries needed and the limit |
 | Host crash or non-zero exit | The exit code and the tail of the host's stderr |
 
 Line mapping works because each synthetic file records, in the manifest, the line offset between the synthetic body and the original lambda. Column mapping is exact on lines without spliced consts and approximate on lines with them.
@@ -382,7 +393,11 @@ The rule: a value is only as fresh as what the build knows about. Declared input
 1. **Gradle up-to-date checks.** Declared files, directories and env var values, the host classpath, and the host JDK version are inputs of the compile task. Any change makes Gradle rerun it.
 2. **Kotlin incremental compilation.** Even when the task reruns, incremental compilation normally only recompiles changed `.kt` files. A changed `data.json` changes no source file, so a stale value could survive.
 
-The fix for layer 2 comes almost for free. Registered inputs and plain plugin options are non-incremental task inputs. When one changes, Gradle runs the task non-incrementally, and KGP turns that into a full compile of the module (`SourcesChanges.Unknown`) ✓. The input hash option stays as an explicit backstop, and it's handy in the manifest for debugging. The phase 3 test still has to prove the behaviour end to end. If it doesn't hold, the fallback is disabling incremental compilation for modules using comptime.
+The fix for layer 2 comes almost for free. Registered inputs and plain plugin options are non-incremental task inputs. When one changes, Gradle runs the task non-incrementally, and KGP turns that into a full compile of the module (`SourcesChanges.Unknown`) ✓. The input hash option stays as an explicit backstop, and it's recorded in the manifest and the result cache key. The phase 3 test (`FreshnessTest`) proves the behaviour end to end.
+
+### Result cache
+
+A full compile would rerun every block; the result cache (phase 5) makes that cheap. A block's key covers its synthetic source (text with constants spliced, imports, result type), the encoder, the input hash, the declared env values, the host JDK's `release` file, the stdlib's hash, the language settings and the Kotlin version. Only cache misses go to the host; if every block hits, no host starts. Undeclared inputs aren't in the key, so a block reading them keeps its cached value until `clean`: the same rule as everywhere else, now also across full compiles.
 
 ### Const changes
 
@@ -396,6 +411,8 @@ Blocks that read the clock, randomness, the network, or undeclared files or env 
 
 Each phase ends with a test that must pass before the next starts.
 
+All five phases are done; each phase's done criterion is a test in the repo.
+
 1. **Spike.** A throwaway IR plugin plus host that turns `comptime { 6 * 7 }` into `42` in a JVM module, and answers the spike checklist below.
    - Done when: the round trip works from inside the Kotlin daemon, and every checklist item has a written answer.
 2. **JVM end to end.** Real block extraction, the reference check, const splicing, import filtering, the full encoder, IR construction for all result types including holders and builders, error mapping, timeouts.
@@ -404,18 +421,18 @@ Each phase ends with a test that must pass before the next starts.
    - Done when: editing a declared file changes the baked value on the next build, changing a declared env var between two builds on the same Kotlin daemon changes the baked value, and editing an unrelated file doesn't rerun blocks elsewhere.
 4. **JDK pinning and Android.** Toolchain-resolved JDKs; an Android library module as a test case.
    - Done when: with `jdk` pinned to 21 and the compile toolchain on 17, a block baking `Runtime.version().feature()` yields 21; an Android library module builds with a block in it; and a block calling a JDK 21-only API on a 17 toolchain fails in the main compile with a clear error.
-5. **Polish.** Possible items:
+5. **Polish.** Implemented items:
    - a result cache keyed on block text, const values, input hashes and JDK version;
    - splitting large values across methods;
-   - nicer error output, and showing stdout from successful blocks;
+   - nicer error output (the source line that threw), and showing output from successful blocks;
    - compiling blocks inside the warm Kotlin daemon and using the child JVM only to run them, which saves a cold compile per build;
-   - optionally, a FIR checker for earlier errors.
+   - a FIR checker for earlier errors on block shape and result type.
 
 ## Testing
 
-- **Compiler level:** box-style tests that compile a snippet with the plugin and run the result, using the test setup from JetBrains' Kotlin compiler-plugin template or kctfork (`dev.zacsweers.kctfork`). Covers result types, splicing edge cases, the reference check, and diagnostics.
-- **Host:** unit tests that run `HostMain` on hand-written job directories. The protocol is plain files, so no compiler is needed.
-- **Build level:** Gradle TestKit fixture projects for incremental compilation, the build cache, env vars, JDK pinning, and Android.
+- **Compiler level** (`comptime-compiler`): box-style tests through a small in-process harness that runs `K2JVMCompiler` with the plugin and loads the output. Covers result types, splicing edge cases, the reference check, the FIR checker, splitting, the result cache, and diagnostics.
+- **Host:** exercised through the compiler tests; the protocol is plain files, so a failed job can also be rerun by hand.
+- **Build level** (`comptime-gradle`): Gradle TestKit fixture projects for the Kotlin daemon round trip, incremental compilation, the result cache, declared inputs and env vars, JDK pinning (needs JDK 17 and 21 installed), and Android (needs an Android SDK with platform 36; skipped without one).
 
 ## Spike checklist and risks
 
@@ -435,7 +452,7 @@ All answered; details and the tests behind each answer are in [spike.md](spike.m
 | IR plugin API changes between Kotlin versions | Plugin breaks on every Kotlin bump | Pin one Kotlin version; accept the churn as part of the fun |
 | `ConstInliner` order or `wasInlined` changes | Const splice sites not found | Treat any `IrConst` whose source text isn't a literal as a splice site |
 | Incremental compilation ignores option changes | Stale values after input edits | Disable incremental compilation for comptime modules |
-| Host startup + compile time | Seconds added per module build | Result cache and in-daemon compile in phase 5; one job per module keeps it to one compile |
+| Host startup + compile time | Seconds added per module build | Mitigated in phase 5: blocks compile in the warm daemon (the spike test went from 13.2 s to 3.0 s cold), and the result cache skips the host when every block hits |
 | Rendering `IrType` back to Kotlin source | Wrong type argument in synthetic file | Restrict to the whitelisted types, which render trivially |
 | Synthetic holders reached from another module | `IllegalAccessError` at runtime | Build in place inside non-private inline functions (already the rule) |
 
@@ -502,5 +519,16 @@ Changes from the original draft, after review. ✓ marks what was checked agains
 
 - The spike corrected two details: a BOM must be kept, not dropped, before slicing; and an inlined const's offsets cover only the selector, so the qualifier is spliced away with it. The lambda label sits outside the lambda's span.
 - The type descriptor shared with the host's encoder is a prefix code: `?` before a nullable type, one letter per kind, then its arguments (`L?T` is `List<String?>`, `?LT` is `List<String>?`).
-- Holders and builders are private top-level declarations named `<File>$comptime$<n>`, numbered per file so incremental recompiles of one file keep names stable.
+- Holders are private top-level classes named `<File>$comptime$<n>`, numbered per file so incremental recompiles of one file keep names stable. (Phase 5 moved builders into these classes too.)
 - Known gap: typealiases are fully expanded in IR, so a project typealias whose name matches a different stdlib type can still silently re-resolve on the host. A typealias to a stdlib type whose name doesn't exist there fails loudly.
+
+### Implementation notes (phases 3–5)
+
+- **The Kotlin daemon runs on Gradle's JDK, not the toolchain.** With a 17 toolchain, KGP 2.4.20 started the daemon with JDK 21 and passed `-jdk-home` 17. Defaulting the host to the compile's `-jdk-home` (a review decision) is what makes an unpinned block run on 17; the daemon's own JDK would have been 21 (`JdkPinningTest`).
+- **Env forwarding matters in practice:** `FreshnessTest` changes a declared variable between two builds that share one Kotlin daemon, and the block sees the new value.
+- **AGP 9's built-in Kotlin picks up the plugin unchanged:** `KotlinCompilerPluginSupportPlugin` applies to its compilations, and holders land in `built_in_kotlinc` output (`AndroidTest`, AGP 9.4.1, compileSdk 36).
+- **In-process compile** reuses `BlockCompiler` (moved to the shared `protocol/` sources). Nesting a `K2JVMCompiler` run inside an IR extension works in 2.4.20; the spike test dropped from 13.2 s to 3.0 s cold.
+- **The cache is on by default.** A block reading undeclared files now keeps its value across full compiles, until `clean` or `cache.set(false)`.
+- **Holders are now one class per value,** with static members: builders moved from top-level functions into a static `build()`, so splitting has a class of its own to put helpers and constants in.
+- **The FIR checker shares the result-type rules** with the IR analysis (`ResultType.shape`), so both accept the same types; the FIR side reads Java platform types from the flexible type's bounds.
+

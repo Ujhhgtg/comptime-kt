@@ -1,5 +1,6 @@
 package dev.ujhhgtg.comptime.compiler
 
+import dev.ujhhgtg.comptime.compiler.fir.ComptimeFirRegistrar
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.cli.jvm.config.jvmClasspathRoots
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
@@ -8,6 +9,7 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.JVMConfigurationKeys
 import org.jetbrains.kotlin.config.LanguageFeature
 import org.jetbrains.kotlin.config.languageVersionSettings
+import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrarAdapter
 import java.io.File
 import java.util.zip.ZipFile
 
@@ -16,6 +18,7 @@ class ComptimeCompilerPluginRegistrar : CompilerPluginRegistrar() {
     override val supportsK2: Boolean = true
 
     override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
+        FirExtensionRegistrarAdapter.registerExtension(ComptimeFirRegistrar())
         IrGenerationExtension.registerExtension(ComptimeIrGenerationExtension { optionsFrom(configuration) })
     }
 
@@ -40,6 +43,9 @@ class ComptimeCompilerPluginRegistrar : CompilerPluginRegistrar() {
             stdlib = configuration.get(keys.STDLIB)?.let(::File) ?: findStdlib(configuration.jvmClasspathRoots),
             sizeLimitBytes = configuration.get(keys.SIZE_LIMIT)?.toInt() ?: 48 * 1024,
             hostCompilerArgs = hostCompilerArgs(configuration),
+            inputHash = configuration.get(keys.INPUT_HASH),
+            cacheDir = configuration.get(keys.CACHE_DIR)?.let(::File),
+            inProcessCompile = configuration.get(keys.IN_PROCESS_COMPILE)?.toBooleanStrict() ?: true,
         )
     }
 

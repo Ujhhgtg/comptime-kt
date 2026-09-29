@@ -80,6 +80,20 @@ class ErrorsTest {
     }
 
     @Test
+    fun `shape and type errors are reported during analysis, before IR`() {
+        val r = Harness.compile(mapOf("Main.kt" to """
+            import dev.ujhhgtg.comptime.comptime
+            fun helper() = 1
+            fun badType(): Number = comptime<Number> { 5 }
+            fun badReference() = comptime { helper() }
+        """.trimIndent()))
+        assertFalse(r.ok)
+        // The FIR checker stops the compile after analysis: the IR pass (reference check, host) never runs.
+        assertEquals(listOf(3), r.errors.map { it.line }, r.errors.joinToString("\n"))
+        assertFalse(File(r.workDir, "comptime").exists(), "no job should have been written")
+    }
+
+    @Test
     fun `an exception reports type, message, mapped stack trace and output`() {
         val errors = errorsOf("""
             import dev.ujhhgtg.comptime.comptime
@@ -94,6 +108,7 @@ class ErrorsTest {
         val e = errors.assertOne("comptime block threw java.lang.IllegalArgumentException: bad input", line = 3)
         assertTrue("Main.kt:6 (comptime block)" in e.text, e.text)
         assertTrue("Main.kt:7 (comptime block)" in e.text, e.text)
+        assertTrue("> fun inner(): Int = throw IllegalArgumentException(" in e.text, e.text) // excerpt of the throwing line
         assertEquals(2, Regex("""\(comptime block\)""").findAll(e.text).count(), e.text) // no synthetic scaffolding frames
         assertTrue("caused by java.lang.RuntimeException: root" in e.text, e.text)
         assertTrue("about to fail" in e.text && "on stderr" in e.text, e.text)
@@ -149,14 +164,16 @@ class ErrorsTest {
     }
 
     @Test
-    fun `results over the size limit are rejected`() {
+    fun `values that can't be split are limited`() {
         val errors = errorsOf("""
             import dev.ujhhgtg.comptime.comptime
-            fun big() = comptime { List(5000) { it } }
+            inline fun inPlace() = comptime { List(5000) { it } }
             fun small() = comptime { List(10) { it } }
+            fun manyConstants() = comptime { List(70_000) { it + 100_000 } }
         """.trimIndent(), options = mapOf("sizeLimit" to "8192"))
-        errors.assertOne("too large", line = 2)
-        assertEquals(1, errors.size, errors.joinToString("\n"))
+        errors.assertOne("too large to build inside an inline function", line = 2)
+        errors.assertOne("class-file constants", line = 4)
+        assertEquals(2, errors.size, errors.joinToString("\n"))
     }
 
     @Test

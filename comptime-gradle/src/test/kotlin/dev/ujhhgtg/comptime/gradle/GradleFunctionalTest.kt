@@ -1,54 +1,20 @@
 package dev.ujhhgtg.comptime.gradle
 
 import org.gradle.testkit.runner.BuildResult
-import org.gradle.testkit.runner.GradleRunner
 import org.gradle.testkit.runner.TaskOutcome
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
 import java.io.File
 
 /**
- * Builds fixture projects with the real Gradle and Kotlin daemons, against the artifacts published to
- * `build/repo`. Covers the phase 1 done criterion (round trip from inside the Kotlin daemon) and the spike's
- * incremental-compilation questions.
+ * The phase 1 done criterion (round trip from inside the Kotlin daemon), the spike's incremental-compilation
+ * questions, and the result cache.
  */
-class GradleFunctionalTest {
-    @TempDir
-    lateinit var dir: File
-
-    private val repo = System.getProperty("comptime.testRepo")
-    private val version = System.getProperty("comptime.version")
-    private val kotlinVersion = System.getProperty("comptime.kotlinVersion")
-
-    private fun write(path: String, text: String) = File(dir, path).apply { parentFile.mkdirs(); writeText(text.trimIndent() + "\n") }
-
+class GradleFunctionalTest : FixtureTest() {
     private fun fixture(appBuildExtra: String = "") {
-        write("settings.gradle.kts", """
-            pluginManagement {
-                repositories {
-                    maven(uri("${repo.replace("\\", "/")}"))
-                    maven("https://maven-central.storage-download.googleapis.com/maven2/")
-                    gradlePluginPortal()
-                }
-            }
-            dependencyResolutionManagement {
-                repositories {
-                    maven(uri("${repo.replace("\\", "/")}"))
-                    maven("https://maven-central.storage-download.googleapis.com/maven2/")
-                    mavenCentral()
-                }
-            }
-            rootProject.name = "fixture"
-            include(":lib", ":app")
-        """)
-        write("gradle.properties", """
-            org.gradle.jvmargs=-Xmx1g
-            kotlin.compiler.execution.strategy=daemon
-            kotlin.suppressGradlePluginWarnings=DeprecatedGradleVersionWarning
-        """)
+        settings(":lib", ":app")
         write("build.gradle.kts", """
             plugins {
                 kotlin("jvm") version "$kotlinVersion" apply false
@@ -109,13 +75,6 @@ class GradleFunctionalTest {
         write("app/data.txt", "one")
     }
 
-    private fun gradle(vararg args: String): BuildResult =
-        GradleRunner.create()
-            .withProjectDir(dir)
-            .withArguments(*args, "--stacktrace")
-            .forwardOutput()
-            .build()
-
     private fun BuildResult.compileOutcome() = task(":app:compileKotlin")?.outcome
 
     private val runs get() = File(dir, "app/runs.log").takeIf { it.isFile }?.readText()?.length ?: 0
@@ -136,7 +95,8 @@ class GradleFunctionalTest {
 
     @Test
     fun `a changed plugin option forces a full recompile, and IC tracks holder classes`() {
-        fixture()
+        // Without the result cache, a full recompile reruns every block.
+        fixture("comptime { cache.set(false) }")
         gradle(":app:run")
         assertEquals(1, runs)
 
@@ -169,5 +129,30 @@ class GradleFunctionalTest {
             .replace("comptime { (0 until 4).map { it * it } }", "listOf(0, 1, 4, 9)"))
         gradle(":app:run")
         assertFalse(holder.exists(), "holder class should be removed by incremental compilation")
+    }
+
+    @Test
+    fun `the result cache skips unchanged blocks when their file recompiles`() {
+        fixture()
+        gradle(":app:run")
+        assertEquals(1, runs)
+
+        // Data.kt recompiles, but its block's text is unchanged: the cached value is used and the block doesn't run.
+        File(dir, "app/src/main/kotlin/app/Data.kt").appendText("\n// touched\n")
+        val touched = gradle(":app:run")
+        assertEquals(TaskOutcome.SUCCESS, touched.compileOutcome())
+        assertEquals(1, runs)
+        assertEquals("one", touched.printed("data"))
+
+        // Changing the block's text misses the cache.
+        write("app/src/main/kotlin/app/Data.kt", read("app/src/main/kotlin/app/Data.kt").replace(".trim()", ".trim().uppercase()"))
+        val changed = gradle(":app:run")
+        assertEquals(2, runs)
+        assertEquals("ONE", changed.printed("data"))
+
+        // clean empties the cache.
+        gradle("clean")
+        gradle(":app:run")
+        assertEquals(3, runs)
     }
 }

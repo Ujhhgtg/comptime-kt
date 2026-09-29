@@ -75,5 +75,37 @@ sealed class ResultValue {
         }
 
         private const val BOX = 3
+
+        /**
+         * Class-file constant pool entries [value] needs for its `ldc` operands: one per distinct int outside the
+         * `sipush` range, char or float; two per distinct long, double or string.
+         */
+        fun constantPoolEntries(value: ResultValue): Int {
+            // Keyed by kind and bits, so 1 and 1L or 0.0 and -0.0 count separately, as in the pool.
+            val seen = HashMap<String, Int>()
+            fun add(v: Any) {
+                val (key, weight) = when (v) {
+                    is Int -> if (v in Short.MIN_VALUE..Short.MAX_VALUE) return else "I$v" to 1
+                    is Char -> if (v.code <= Short.MAX_VALUE) return else "C${v.code}" to 1
+                    is Float -> if (v == 0f || v == 1f || v == 2f) return else "F${v.toRawBits()}" to 1
+                    is Long -> if (v == 0L || v == 1L) return else "J$v" to 2
+                    is Double -> if (v == 0.0 || v == 1.0) return else "D${v.toRawBits()}" to 2
+                    is String -> "S$v" to 2
+                    else -> return
+                }
+                seen[key] = weight
+            }
+            fun visit(v: ResultValue) {
+                when (v) {
+                    Null, UnitValue -> {}
+                    is Scalar -> add(v.value)
+                    is Sequence -> v.items.forEach(::visit)
+                    is MapValue -> v.entries.forEach { (k, e) -> visit(k); visit(e) }
+                    is PrimitiveArray -> v.values.forEach(::add)
+                }
+            }
+            visit(value)
+            return seen.values.sum()
+        }
     }
 }

@@ -1,5 +1,6 @@
 package dev.ujhhgtg.comptime.host
 
+import dev.ujhhgtg.comptime.protocol.BlockCompiler
 import dev.ujhhgtg.comptime.protocol.JobLayout
 import dev.ujhhgtg.comptime.protocol.Json
 import dev.ujhhgtg.comptime.protocol.asArray
@@ -15,9 +16,10 @@ import kotlin.system.exitProcess
 /**
  * The comptime host: compiles the synthetic block sources of one job and runs each block in its own classloader.
  *
- * Usage: `HostMain <job-dir>`. Reads `manifest.json`, writes `classes/` and `out/`. See docs/plan.md,
- * "Host process and protocol". Always exits through [Runtime.halt] so threads or shutdown hooks left behind by
- * blocks can't keep the process alive.
+ * Usage: `HostMain <job-dir>`. Reads `manifest.json`, writes `classes/` and `out/`. When the manifest says the job is
+ * `precompiled`, the compiler plugin already compiled the blocks in-process and the host only runs them. See
+ * docs/plan.md, "Host process and protocol". Always exits through [Runtime.halt] so threads or shutdown hooks left
+ * behind by blocks can't keep the process alive.
  */
 object HostMain {
     @JvmStatic
@@ -48,8 +50,10 @@ object HostMain {
         layout.out.mkdirs()
         layout.classes.mkdirs()
 
-        val compiled = BlockCompiler(layout, stdlib, compilerArgs).compile()
-        if (!compiled) return
+        if (manifest["precompiled"] != true) {
+            val compiled = BlockCompiler(layout, stdlib, File(System.getProperty("java.home")), compilerArgs).compile()
+            if (!compiled) return
+        }
 
         val platformLoader = platformClassLoader()
         for (id in blockIds) {
@@ -92,6 +96,11 @@ object HostMain {
 
         val bytes = result
         if (bytes != null) {
+            val out = stdout.text()
+            val err = stderr.text()
+            if (out.isNotEmpty() || err.isNotEmpty()) {
+                layout.output(id).writeText(Json.write(linkedMapOf("stdout" to out, "stderr" to err)))
+            }
             layout.result(id).writeBytes(bytes)
         } else {
             layout.error(id).writeText(Json.write(describeFailure(id, failure, stdout, stderr)))

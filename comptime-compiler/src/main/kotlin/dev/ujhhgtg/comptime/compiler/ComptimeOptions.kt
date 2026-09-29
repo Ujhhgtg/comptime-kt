@@ -22,7 +22,16 @@ class ComptimeOptions(
     val sizeLimitBytes: Int,
     /** Extra arguments for the host's compile: language settings and opt-ins. */
     val hostCompilerArgs: List<String>,
-)
+    /** Hash of the declared inputs, from the Gradle plugin; part of the result cache key. */
+    val inputHash: String?,
+    /** Where results are cached across builds, or `null` for no cache. */
+    val cacheDir: File?,
+    /** Compile blocks inside this (warm) compiler process instead of in the host. */
+    val inProcessCompile: Boolean,
+) {
+    /** The JDK the host runs on: the parent of `bin/java`. */
+    val hostJdkHome: File get() = javaExecutable.canonicalFile.parentFile.parentFile
+}
 
 object ComptimeConfigurationKeys {
     val HOST_CLASSPATH = CompilerConfigurationKey.create<List<String>>("comptime host classpath")
@@ -35,4 +44,6 @@ object ComptimeConfigurationKeys {
     val STDLIB = CompilerConfigurationKey.create<String>("comptime stdlib jar")
     val SIZE_LIMIT = CompilerConfigurationKey.create<String>("comptime size limit bytes")
     val INPUT_HASH = CompilerConfigurationKey.create<String>("comptime input hash")
+    val CACHE_DIR = CompilerConfigurationKey.create<String>("comptime result cache directory")
+    val IN_PROCESS_COMPILE = CompilerConfigurationKey.create<String>("comptime in-process compile")
 }

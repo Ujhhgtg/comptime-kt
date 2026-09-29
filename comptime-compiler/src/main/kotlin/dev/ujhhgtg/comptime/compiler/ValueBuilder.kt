@@ -7,6 +7,7 @@ import org.jetbrains.kotlin.ir.expressions.impl.IrCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstructorCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrGetObjectValueImpl
+import org.jetbrains.kotlin.ir.expressions.impl.IrSpreadElementImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrVarargImpl
 import org.jetbrains.kotlin.ir.expressions.impl.fromSymbolOwner
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -168,10 +169,12 @@ class ValueBuilder(private val context: IrPluginContext) {
         }
     }
 
+    private fun primitiveArrayFunction(kind: ScalarKind): IrSimpleFunctionSymbol = primitiveArrayOf.getOrPut(kind) {
+        varargFunction("kotlin", kind.arrayName!!.removePrefix("kotlin.").removeSuffix("Array").replaceFirstChar { it.lowercaseChar() } + "ArrayOf")
+    }
+
     private fun primitiveArray(value: ResultValue.PrimitiveArray, kind: ScalarKind, start: Int, end: Int): IrExpression {
-        val fn = primitiveArrayOf.getOrPut(kind) {
-            varargFunction("kotlin", kind.arrayName!!.removePrefix("kotlin.").removeSuffix("Array").replaceFirstChar { it.lowercaseChar() } + "ArrayOf")
-        }
+        val fn = primitiveArrayFunction(kind)
         val arrayType = klass(kind.arrayName!!).typeWith()
         val elementType = scalarType(kind)
         val vararg = IrVarargImpl(
@@ -180,4 +183,130 @@ class ValueBuilder(private val context: IrPluginContext) {
         )
         return IrCallImpl(start, end, arrayType, fn).apply { arguments[0] = vararg }
     }
+
+    // ---------------------------------------------------------------- splitting
+
+    /**
+     * Like [build], but keeps every method the value's construction lands in under [budget] bytes of bytecode: a
+     * collection too large for one method is built from spreads of chunks (`listOf(*part0(), *part1())`), each chunk
+     * built by a helper function that [helper] creates and returns a call to.
+     */
+    fun buildSplit(
+        value: ResultValue,
+        type: ResultType,
+        start: Int,
+        end: Int,
+        budget: Long,
+        helper: (returnType: IrType, body: IrExpression) -> IrExpression,
+    ): IrExpression {
+        if (value is ResultValue.Null || ResultValue.estimateBytecode(value) <= budget) return build(value, type, start, end)
+
+        fun element(item: ResultValue, itemType: ResultType): IrExpression =
+            if (item !is ResultValue.Null && ResultValue.estimateBytecode(item) > budget) {
+                helper(irType(itemType), buildSplit(item, itemType, start, end, budget, helper))
+            } else {
+                build(item, itemType, start, end)
+            }
+
+        return when (type) {
+            is ResultType.Scalar -> build(value, type, start, end)
+            is ResultType.ListOf -> spreadSequence((value as ResultValue.Sequence).items, type.element, listOf, builtIns.listClass, budget, start, end, helper, ::element)
+            is ResultType.SetOf -> spreadSequence((value as ResultValue.Sequence).items, type.element, setOf, builtIns.setClass, budget, start, end, helper, ::element)
+            is ResultType.ArrayOf -> spreadSequence((value as ResultValue.Sequence).items, type.element, arrayOf, builtIns.arrayClass, budget, start, end, helper, ::element)
+            is ResultType.MapOf -> {
+                val key = irType(type.key)
+                val v = irType(type.value)
+                val pairType = pairClass.typeWith(key, v)
+                val entries = (value as ResultValue.MapValue).entries
+                val parts = chunks(entries, budget) { (k, e) -> 16 + cost(k, budget) + cost(e, budget) }.map { chunk ->
+                    val pairs = chunk.map { (k, e) ->
+                        IrConstructorCallImpl.fromSymbolOwner(start, end, pairType, pairConstructor, classTypeParametersCount = 2).apply {
+                            typeArguments[0] = key
+                            typeArguments[1] = v
+                            arguments[0] = element(k, type.key)
+                            arguments[1] = element(e, type.value)
+                        }
+                    }
+                    helper(builtIns.arrayClass.typeWith(pairType), arrayOfCall(pairType, pairs, start, end))
+                }
+                IrCallImpl(start, end, builtIns.mapClass.typeWith(key, v), mapOf).apply {
+                    typeArguments[0] = key
+                    typeArguments[1] = v
+                    arguments[0] = spreads(pairType, parts, start, end)
+                }
+            }
+            is ResultType.PrimitiveArray -> {
+                val array = value as ResultValue.PrimitiveArray
+                val arrayType = klass(type.kind.arrayName!!).typeWith()
+                val parts = array.values.chunked(((budget - 64) / 8).toInt().coerceAtLeast(1)).map { chunk ->
+                    helper(arrayType, primitiveArray(ResultValue.PrimitiveArray(type.kind, chunk), type.kind, start, end))
+                }
+                IrCallImpl(start, end, arrayType, primitiveArrayFunction(type.kind)).apply {
+                    arguments[0] = IrVarargImpl(start, end, arrayType, scalarType(type.kind), parts.map { IrSpreadElementImpl(start, end, it) })
+                }
+            }
+        }
+    }
+
+    private fun spreadSequence(
+        items: List<ResultValue>,
+        elementType: ResultType,
+        varargFn: IrSimpleFunctionSymbol,
+        container: IrClassSymbol,
+        budget: Long,
+        start: Int,
+        end: Int,
+        helper: (IrType, IrExpression) -> IrExpression,
+        element: (ResultValue, ResultType) -> IrExpression,
+    ): IrExpression {
+        val element0 = irType(elementType)
+        val parts = chunks(items, budget) { 6 + cost(it, budget) }.map { chunk ->
+            helper(builtIns.arrayClass.typeWith(element0), arrayOfCall(element0, chunk.map { element(it, elementType) }, start, end))
+        }
+        return IrCallImpl(start, end, container.typeWith(element0), varargFn).apply {
+            typeArguments[0] = element0
+            arguments[0] = spreads(element0, parts, start, end)
+        }
+    }
+
+    /** Bytecode an item costs where it's used: its own code, or a call when it gets a helper of its own. */
+    private fun cost(item: ResultValue, budget: Long): Long =
+        ResultValue.estimateBytecode(item).let { if (it > budget) 8 else it }
+
+    /** Greedy chunks whose summed [cost] stays under [budget], leaving room for the array itself. */
+    private fun <T> chunks(items: List<T>, budget: Long, cost: (T) -> Long): List<List<T>> {
+        val result = ArrayList<List<T>>()
+        var current = ArrayList<T>()
+        var used = 64L
+        for (item in items) {
+            val c = cost(item)
+            if (current.isNotEmpty() && used + c > budget) {
+                result += current
+                current = ArrayList()
+                used = 64L
+            }
+            current += item
+            used += c
+        }
+        if (current.isNotEmpty()) result += current
+        return result
+    }
+
+    private fun arrayOfCall(element: IrType, elements: List<IrExpression>, start: Int, end: Int): IrExpression =
+        IrCallImpl(start, end, builtIns.arrayClass.typeWith(element), arrayOf).apply {
+            typeArguments[0] = element
+            arguments[0] = IrVarargImpl(
+                start, end,
+                builtIns.arrayClass.typeWithArguments(listOf(makeTypeProjection(element, Variance.OUT_VARIANCE))),
+                element,
+                elements,
+            )
+        }
+
+    private fun spreads(element: IrType, parts: List<IrExpression>, start: Int, end: Int) = IrVarargImpl(
+        start, end,
+        builtIns.arrayClass.typeWithArguments(listOf(makeTypeProjection(element, Variance.OUT_VARIANCE))),
+        element,
+        parts.map { IrSpreadElementImpl(start, end, it) },
+    )
 }
