@@ -2,7 +2,7 @@
 
 Sep 29, 2026 · @Jack Scott · revised the same day after review (see [Revision notes](#revision-notes))
 
-Target toolchain: Kotlin 2.4.20 (latest stable at time of writing), K2, Gradle. Statements marked ✓ were checked against the Kotlin 2.4.20 compiler and Kotlin Gradle plugin sources.
+Target toolchain: Kotlin 2.4.20 (latest stable at time of writing), K2, Gradle. Package, Maven group and Gradle plugin ID: `dev.ujhhgtg.comptime`. Statements marked ✓ were checked against the Kotlin 2.4.20 compiler and Kotlin Gradle plugin sources.
 
 ## Overview
 
@@ -44,7 +44,7 @@ Android source sets are expected to work the same way as JVM, with one known lim
 A block is an ordinary lambda with no receiver. It is evaluated once per call site per build, and its value is baked in.
 
 ```kotlin
-// comptime-runtime, package dev.example.comptime (placeholder, like the plugin ID)
+// comptime-runtime, package dev.ujhhgtg.comptime
 fun <T> comptime(block: () -> T): T =
     error("comptime plugin not applied")
 ```
@@ -54,7 +54,7 @@ The function is deliberately not `inline`, so the call and its lambda survive un
 ### Block shape
 
 - The argument must be a lambda literal, optionally labelled (`comptime lbl@{ ... }`). A function reference, a variable holding a lambda, or an anonymous `fun() { }` is a compile error.
-- The callee must be written `comptime` or fully qualified. Calling through an import alias (`import dev.example.comptime.comptime as ct`) is a compile error in phase 1, because the host's shadow function is what provides the `@comptime` label.
+- The callee must be written `comptime` or fully qualified. Calling through an import alias (`import dev.ujhhgtg.comptime.comptime as ct`) is a compile error in phase 1, because the host's shadow function is what provides the `@comptime` label.
 - A `comptime` call nested inside a block is not collected separately. It runs as part of the outer block in the host, through the shadow function.
 
 ### What a block may reference
@@ -136,7 +136,7 @@ The compiler plugin is IR-only in phase 1: a `CommandLineProcessor` for options,
 
 The extension runs after fir2ir and before any lowering or inlining. By then the compiler has already replaced const reads with literals (see [Const splicing](#const-splicing)). Per module it runs three stages:
 
-1. **Collect.** Visit every file, find calls whose callee is `dev.example.comptime.comptime`, and skip calls nested inside another block. Record for each: file path, lambda offsets, the call's `IrType`, the inlined constants inside the lambda, and every symbol it references.
+1. **Collect.** Visit every file, find calls whose callee is `dev.ujhhgtg.comptime.comptime`, and skip calls nested inside another block. Record for each: file path, lambda offsets, the call's `IrType`, the inlined constants inside the lambda, and every symbol it references.
 2. **Check.** Validate block shape, result type and references. Blocks that fail are reported here and never reach the host.
 3. **Evaluate and replace.** Send all valid blocks to the host in one job, wait, then replace each call with the IR built from its result.
 
@@ -222,7 +222,7 @@ The host is a standalone JVM program that the plugin always runs as a child proc
 
 ```
 <jdk>/bin/java -cp <host.jar + kotlin-compiler-embeddable deps> \
-    comptime.host.HostMain <job-dir>
+    dev.ujhhgtg.comptime.host.HostMain <job-dir>
 ```
 
 - **JDK:** the pinned JDK's `java`; else `JVMConfigurationKeys.JDK_HOME`, the `-jdk-home` that KGP sets from the compile task's toolchain ✓, so blocks run on the JDK they were type-checked against; else, under `-no-jdk`, the daemon's own `System.getProperty("java.home")`.
@@ -325,7 +325,7 @@ The Gradle plugin is a `KotlinCompilerPluginSupportPlugin` and nothing more. It 
 ```kotlin
 plugins {
     kotlin("jvm")
-    id("dev.example.comptime")
+    id("dev.ujhhgtg.comptime")
 }
 
 comptime {
@@ -459,6 +459,7 @@ Changes from the original draft, after review. ✓ marks what was checked agains
 - **Import aliases for `comptime` are rejected** in phase 1.
 - **`timeout` is a `java.time.Duration`**, Gradle's own convention and usable from Groovy.
 - **`comptime-runtime` is `compileOnly`.**
+- **Package, Maven group and Gradle plugin ID are `dev.ujhhgtg.comptime`**, replacing the `dev.example.comptime` placeholder.
 
 ### Corrections
 
