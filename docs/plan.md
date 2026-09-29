@@ -4,6 +4,8 @@ Sep 29, 2026 · @Jack Scott · revised the same day after review (see [Revision 
 
 Target toolchain: Kotlin 2.4.20 (latest stable at time of writing), K2, Gradle. Package, Maven group and Gradle plugin ID: `dev.ujhhgtg.comptime`. Statements marked ✓ were checked against the Kotlin 2.4.20 compiler and Kotlin Gradle plugin sources.
 
+**Status:** phases 1 and 2 are implemented and tested; the spike's answers are in [spike.md](spike.md). Phase 3 (`inputs` and `env` in the Gradle DSL) and phase 4 (`jdk`) are next: the compiler plugin already accepts `env`, `envUnset` and `inputHash` options, but the Gradle plugin only exposes `timeout` so far.
+
 ## Overview
 
 `comptime { ... }` runs a block of Kotlin at build time on a desktop JDK and bakes its result into the compiled code. Think Rust's `build.rs`, but inline at the call site.
@@ -162,11 +164,13 @@ The check closes a hole that the host compile alone leaves open. Dropping a proj
 
 Libraries that share those package prefixes (`javax.inject`, `kotlin-test`, `kotlin-reflect`) pass the check and then fail to resolve in the host. That failure is loud, so it's acceptable.
 
+One gap remains: IR has no typealias information in 2.4.20, so a project typealias is checked as the type it expands to. If its name also names a different stdlib or JDK type, the host resolves that other type silently.
+
 ### Block extraction
 
-The block's text comes from the original file on disk (`IrFile.fileEntry.name`). Before slicing, the text is decoded as UTF-8, a BOM is dropped, and line endings are normalized (CRLF and lone CR to LF), exactly as the compiler does before computing offsets ✓. IR offsets are UTF-16 char offsets into that normalized text.
+The block's text comes from the original file on disk (`IrFile.fileEntry.name`). Before slicing, the text is decoded as UTF-8 and line endings are normalized (CRLF and lone CR to LF), exactly as the compiler does before computing offsets ✓. A BOM is kept: the compiler counts it as one character. IR offsets are UTF-16 char offsets into that normalized text.
 
-The slice is the whole lambda argument: braces included, and its label if it has one. Whether a lambda's label is inside the `IrFunctionExpression` span is a spike question. If it isn't, the label is taken from the text of the call's value argument.
+The slice is the whole lambda argument: braces included, and its label if it has one. The `IrFunctionExpression` span covers the braces but not the label (spike), so the label is taken from the call text between the callee and the lambda. The same check rejects callees that aren't spelled `comptime` or fully qualified.
 
 ### Const splicing
 
@@ -184,6 +188,7 @@ The slice is the whole lambda argument: braces included, and its label if it has
   | `Char`, `String` | `'a'`, `"..."` with `\\`, `\"`, `\'`, `\$` and control characters escaped, other non-printables as `\uXXXX` |
 
 - **String templates:** `$FOO` becomes `${...}` and `${FOO}` becomes `${...}`. Multi-dollar strings (`$$"..."`) interpolate with `$$FOO`, so the splicer reads the actual interpolation prefix before the span instead of assuming a single `$`.
+- **Qualified reads:** an inlined const keeps only the selector's offsets (`MIN_VALUE` in `Int.MIN_VALUE`, found in the spike), so the splicer walks back over the qualifier chain (`Obj.`, `pkg.Obj.`, `Outer.Companion.`) and replaces it too.
 - **Splice order:** from the last offset to the first, so earlier offsets stay valid.
 
 ### Import filtering
@@ -416,12 +421,14 @@ Each phase ends with a test that must pass before the next starts.
 
 The spike exists to answer these questions. If the open ones pass, everything after is grind.
 
-- [ ] The IR extension can spawn the host from inside the Kotlin daemon and read results back, with no classloader or security surprises.
-- [x] How const reads appear in IR before lowering. Answered from the 2.4.20 sources: as already-inlined `IrConst`s with `wasInlined = true` and the original read's offsets, for same-module, other-module and Java constants. Still to confirm: the offsets cover qualified reads (`Obj.FOO`, `pkg.FOO`, `Outer.Companion.FOO`) in full.
-- [ ] Lambda offsets give clean, spliceable text for one-line lambdas, multi-line lambdas, labelled lambdas, labelled returns, string templates, and CRLF files. Also: whether a lambda's label is inside its `IrFunctionExpression` span.
-- [ ] A changed plugin option or registered input forces a non-incremental rebuild of the module. KGP's source says yes; confirm end to end.
-- [ ] Building `listOf(vararg)` and friends in IR produces bytecode that verifies and runs.
-- [ ] A synthetic holder class and builder function added from an `IrGenerationExtension` produce valid bytecode, and incremental compilation tracks the extra class files.
+All answered; details and the tests behind each answer are in [spike.md](spike.md).
+
+- [x] The IR extension can spawn the host from inside the Kotlin daemon and read results back, with no classloader or security surprises.
+- [x] How const reads appear in IR before lowering: as already-inlined `IrConst`s with `wasInlined = true`, for same-module, other-module and Java constants. Their offsets cover only the selector, not the qualifier.
+- [x] Lambda offsets give clean, spliceable text for one-line lambdas, multi-line lambdas, labelled lambdas, labelled returns, string templates, and CRLF files. A lambda's label is outside its `IrFunctionExpression` span.
+- [x] A changed plugin option forces a non-incremental rebuild of the module.
+- [x] Building `listOf(vararg)` and friends in IR produces bytecode that verifies and runs.
+- [x] A synthetic holder class and builder function added from an `IrGenerationExtension` produce valid bytecode, and incremental compilation tracks the extra class files.
 
 | Risk | Impact | Fallback |
 | --- | --- | --- |
@@ -490,3 +497,10 @@ Changes from the original draft, after review. ✓ marks what was checked agains
   - writes `.started` markers, so timeouts and crashes name the right block;
   - exits with `halt`.
 - New sections: Testing, and Where values live. The broken architecture embed is replaced with a Mermaid diagram.
+
+### Implementation notes (phases 1–2)
+
+- The spike corrected two details: a BOM must be kept, not dropped, before slicing; and an inlined const's offsets cover only the selector, so the qualifier is spliced away with it. The lambda label sits outside the lambda's span.
+- The type descriptor shared with the host's encoder is a prefix code: `?` before a nullable type, one letter per kind, then its arguments (`L?T` is `List<String?>`, `?LT` is `List<String>?`).
+- Holders and builders are private top-level declarations named `<File>$comptime$<n>`, numbered per file so incremental recompiles of one file keep names stable.
+- Known gap: typealiases are fully expanded in IR, so a project typealias whose name matches a different stdlib type can still silently re-resolve on the host. A typealias to a stdlib type whose name doesn't exist there fails loudly.
